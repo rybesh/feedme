@@ -88,8 +88,9 @@ def add_category(path: str, d: dict[str, str]):
 
 def add_keywords(params: dict[str, list[str]], d: dict[str, str]):
     if "_nkw" in params:
-        d["descriptionSearch"] = "true"
         d["keywords"] = params["_nkw"][0]
+    if "LH_TitleDesc" in params and params["LH_TitleDesc"] == "1":
+        d["descriptionSearch"] = "true"
 
 
 def add_location_preference(params: dict[str, list[str]], d: dict[str, str]):
