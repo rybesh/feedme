@@ -225,13 +225,13 @@ def copy_entry(entry: AtomEntry, fg: FeedGenerator) -> None:
 
 
 def copy_remaining_entries(
-    feed: Optional[AtomFeed], fg: FeedGenerator, feed_entries: int
+    feed: Optional[AtomFeed], fg: FeedGenerator, entry_count: int
 ) -> None:
     if feed is not None:
         for entry in feed.entries:
-            if feed_entries < MAX_FEED_ENTRIES:
+            if entry_count < MAX_FEED_ENTRIES:
                 copy_entry(entry, fg)
-                feed_entries += 1
+                entry_count += 1
             else:
                 break
 
