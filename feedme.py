@@ -5,6 +5,7 @@ import atoma
 import html
 import httpx
 import os
+import re
 import sys
 from atoma.atom import AtomEntry, AtomFeed
 from datetime import datetime, timezone, timedelta
@@ -14,7 +15,13 @@ from tendo.singleton import SingleInstance, SingleInstanceException
 from typing import Optional, NamedTuple, Iterator
 from urllib.parse import urlparse, parse_qs
 
-from config import APP_ID, FEED_URL, FEED_AUTHOR, MAX_FEED_ENTRIES
+from config import (
+    APP_ID,
+    FEED_URL,
+    FEED_AUTHOR,
+    MAX_FEED_ENTRIES,
+    MAX_LISTING_AGE_DAYS,
+)
 
 headers = {
     "OPERATION-NAME": "findItemsAdvanced",
@@ -30,8 +37,11 @@ class Listing(NamedTuple):
     url: str
     title: str
     start_time: datetime
+    age_in_days: int
+    active: bool
     image_url: str
     price: float
+    buy_it_now: bool
     search_params: dict[str, str]
 
 
@@ -43,6 +53,10 @@ class APIException(Exception):
 class BadSearchURLException(Exception):
     def __init__(self, message: str):
         super().__init__(message)
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @sleep_and_retry
@@ -156,15 +170,19 @@ def get_results(
 
 
 def item_to_listing(item: dict, search_params: dict[str, str]) -> Listing:
+    start_time = datetime.fromisoformat(
+        item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
+    )
     return Listing(
         item["itemId"][0],
         item["viewItemURL"][0],
         item["title"][0],
-        datetime.fromisoformat(
-            item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
-        ),
+        start_time,
+        (now() - start_time).days,
+        item["sellingStatus"][0]["sellingState"][0] == "Active",
         item.get("pictureURLSuperSize", item["galleryURL"])[0],
         float(item["sellingStatus"][0]["convertedCurrentPrice"][0]["__value__"]),
+        item["listingInfo"][0]["listingType"][0] in ("AuctionWithBIN", "FixedPrice"),
         search_params,
     )
 
@@ -172,28 +190,19 @@ def item_to_listing(item: dict, search_params: dict[str, str]) -> Listing:
 def get_listings(
     client: httpx.Client, search_urls: list[str], last_updated: datetime
 ) -> Iterator[Listing]:
-    item_ids = set()
     for url in search_urls:
         try:
             for item, search_params in get_results(client, url, last_updated):
-                item_id = item["itemId"][0]
-                if item_id not in item_ids:
-                    item_ids.add(item_id)
-                    yield item_to_listing(item, search_params)
+                yield item_to_listing(item, search_params)
         except APIException as e:
             print(e, file=sys.stderr)
         except BadSearchURLException as e:
             print(e, file=sys.stderr)
 
 
-def now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def describe(listing: Listing) -> str:
     description = (
-        f"<b>{html.escape(listing.title)}</b>"
-        f"<p>${listing.price:.2f}</p>"
+        f"<p>${listing.price:.2f}{' (BIN)' if listing.buy_it_now else ''}</p>"
         f'<img src="{listing.image_url}"/>'
     )
     if "keywords" in listing.search_params:
@@ -224,16 +233,33 @@ def copy_entry(entry: AtomEntry, fg: FeedGenerator) -> None:
     fe.content(entry.content.value, type="html")
 
 
+tag_uri = re.compile(r"tag:feedme.aeshin.org,2022:item-(\d+)")
+
+
+def parse_listing_id(entry_id: str) -> str:
+    return tag_uri.match(entry_id).group(1)
+
+
 def copy_remaining_entries(
-    feed: Optional[AtomFeed], fg: FeedGenerator, entry_count: int
+    feed: Optional[AtomFeed], fg: FeedGenerator, entry_count: int, listing_ids: set[str]
 ) -> None:
     if feed is not None:
         for entry in feed.entries:
+            listing_id = parse_listing_id(entry.id_)
             if entry_count < MAX_FEED_ENTRIES:
-                copy_entry(entry, fg)
-                entry_count += 1
+                if listing_id not in listing_ids:
+                    copy_entry(entry, fg)
+                    entry_count += 1
             else:
                 break
+
+
+def include_in_feed(listing: Listing, listing_ids: set[str]) -> bool:
+    return (
+        listing.id not in listing_ids
+        and listing.active
+        and listing.age_in_days <= MAX_LISTING_AGE_DAYS
+    )
 
 
 def main():
@@ -244,6 +270,7 @@ def main():
 
     existing_feed = None
     entry_count = 0
+    listing_ids = set()
     last_updated = now() - timedelta(days=1)
 
     if os.path.exists(args.feed):
@@ -265,19 +292,20 @@ def main():
     with httpx.Client() as client:
 
         for listing in get_listings(client, search_urls, last_updated):
+            if include_in_feed(listing, listing_ids):
+                listing_ids.add(listing.id)
+                fe = fg.add_entry(order="append")
+                fe.id(f"tag:feedme.aeshin.org,2022:item-{listing.id}")
+                fe.title(listing.title)
+                fe.updated(listing.start_time.isoformat())
+                fe.link(href=listing.url)
+                fe.content(describe(listing), type="html")
 
-            fe = fg.add_entry(order="append")
-            fe.id(f"tag:feedme.aeshin.org,2022:item-{listing.id}")
-            fe.title(listing.title)
-            fe.updated(listing.start_time.isoformat())
-            fe.link(href=listing.url)
-            fe.content(describe(listing), type="html")
+                entry_count += 1
+                if entry_count > MAX_FEED_ENTRIES:
+                    break
 
-            entry_count += 1
-            if entry_count > MAX_FEED_ENTRIES:
-                break
-
-    copy_remaining_entries(existing_feed, fg, entry_count)
+    copy_remaining_entries(existing_feed, fg, entry_count, listing_ids)
     fg.atom_file(f"{args.feed}.new", pretty=True)
     os.rename(f"{args.feed}.new", args.feed)
 
