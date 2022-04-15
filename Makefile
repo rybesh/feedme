@@ -1,5 +1,6 @@
-PYTHON = ./venv/bin/python
-PIP = ./venv/bin/python -m pip
+PYTHON := ./venv/bin/python
+PIP := ./venv/bin/python -m pip
+.DEFAULT_GOAL := run
 
 $(PYTHON):
 	python3 -m venv venv
@@ -12,7 +13,5 @@ run: $(PYTHON)
 
 clean:
 	rm -rf venv atom.xml
-
-default: run
 
 .PHONY: run clean
