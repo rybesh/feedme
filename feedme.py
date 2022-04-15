@@ -35,6 +35,16 @@ class Listing(NamedTuple):
     search_params: dict[str, str]
 
 
+class APIException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
+class BadSearchURLException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 @sleep_and_retry
 @limits(calls=1, period=1)
 def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
@@ -43,10 +53,12 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
         params=(headers | search_params),
     )
     if not r.status_code == 200:
-        raise Exception(f"GET {r.url} failed ({r.status_code})")
+        raise APIException(f"GET {r.url} failed ({r.status_code})")
     o = r.json()["findItemsAdvancedResponse"][0]
     if not o["ack"][0] == "Success":
-        raise Exception(f"findItemsAdvancedResponse ack was {o['ack'][0]}")
+        raise APIException(
+            f"GET {r.url}:\nfindItemsAdvancedResponse ack was {o['ack'][0]}"
+        )
     return o
 
 
@@ -57,7 +69,7 @@ def add_category(path: str, d: dict[str, str]):
     elif len(parts) == 5:
         d["categoryId"] = parts[3]
     else:
-        raise Exception(f"Cannot handle path:\n{path}")
+        raise BadSearchURLException(f"Cannot handle path:\n{path}")
 
 
 def add_keywords(params: dict[str, list[str]], d: dict[str, str]):
@@ -76,7 +88,7 @@ def add_location_preference(params: dict[str, list[str]], d: dict[str, str]):
         elif params["LH_PrefLoc"][0] == "3":
             d["itemFilter.value"] = "North America"
         else:
-            raise Exception(
+            raise BadSearchURLException(
                 f"Cannot handle location preference:\n{params['LH_PrefLoc'][0]}"
             )
 
@@ -114,7 +126,7 @@ def parse_search_params(url: str) -> dict[str, str]:
     elif o.path.endswith("m.html"):
         add_seller(params, d)
     else:
-        raise Exception(f"Cannot handle url:\n{url}")
+        raise BadSearchURLException(f"Cannot handle url:\n{url}")
     return d
 
 
@@ -162,11 +174,16 @@ def get_listings(
 ) -> Iterator[Listing]:
     item_ids = set()
     for url in search_urls:
-        for item, search_params in get_results(client, url, last_updated):
-            item_id = item["itemId"][0]
-            if item_id not in item_ids:
-                item_ids.add(item_id)
-                yield item_to_listing(item, search_params)
+        try:
+            for item, search_params in get_results(client, url, last_updated):
+                item_id = item["itemId"][0]
+                if item_id not in item_ids:
+                    item_ids.add(item_id)
+                    yield item_to_listing(item, search_params)
+        except APIException as e:
+            print(e, file=sys.stderr)
+        except BadSearchURLException as e:
+            print(e, file=sys.stderr)
 
 
 def now() -> datetime:
