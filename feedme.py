@@ -7,6 +7,7 @@ import httpx
 import os
 import re
 import sys
+import time
 from atoma.atom import AtomEntry, AtomFeed
 from datetime import datetime, timezone, timedelta
 from feedgen.feed import FeedGenerator
@@ -62,18 +63,27 @@ def now() -> datetime:
 @sleep_and_retry
 @limits(calls=1, period=1)
 def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
-    r = client.get(
-        "https://svcs.ebay.com/services/search/FindingService/v1",
-        params=(headers | search_params),
-    )
-    if not r.status_code == 200:
-        raise APIException(f"GET {r.url} failed ({r.status_code})")
-    o = r.json()["findItemsAdvancedResponse"][0]
-    if not o["ack"][0] == "Success":
-        raise APIException(
-            f"GET {r.url}:\nfindItemsAdvancedResponse ack was {o['ack'][0]}"
-        )
-    return o
+    tries = 0
+    while True:
+        try:
+            r = client.get(
+                "https://svcs.ebay.com/services/search/FindingService/v1",
+                params=(headers | search_params),
+            )
+            if not r.status_code == 200:
+                raise APIException(f"GET {r.url} failed ({r.status_code})")
+            o = r.json()["findItemsAdvancedResponse"][0]
+            if not o["ack"][0] == "Success":
+                raise APIException(
+                    f"GET {r.url}:\nfindItemsAdvancedResponse ack was {o['ack'][0]}"
+                )
+            return o
+        except httpx.RequestError as e:
+            tries += 1
+            if tries > 10:
+                raise APIException(f"API call failed ({e})")
+            else:
+                time.sleep(60)
 
 
 def add_category(path: str, d: dict[str, str]):
