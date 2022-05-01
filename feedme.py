@@ -70,6 +70,7 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
                 "https://svcs.ebay.com/services/search/FindingService/v1",
                 params=(headers | search_params),
             )
+            client.get.counter += 1
             if not r.status_code == 200:
                 raise APIException(f"GET {r.url} failed ({r.status_code})")
             o = r.json()["findItemsAdvancedResponse"][0]
@@ -302,6 +303,8 @@ def main():
 
     with httpx.Client() as client:
 
+        client.get.counter = 0
+
         for listing in get_listings(client, search_urls, last_updated):
             if include_in_feed(listing, listing_ids):
                 listing_ids.add(listing.id)
@@ -315,6 +318,8 @@ def main():
                 entry_count += 1
                 if entry_count > MAX_FEED_ENTRIES:
                     break
+
+        print(f"{client.get.counter} API calls", file=sys.stderr)
 
     copy_remaining_entries(existing_feed, fg, entry_count, listing_ids)
     fg.atom_file(f"{args.feed}.new", pretty=True)
