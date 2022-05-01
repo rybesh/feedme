@@ -329,7 +329,7 @@ if __name__ == "__main__":
     try:
         me = SingleInstance()
         main()
-        print(f"{call_api.counter} API calls", file=sys.stderr)
+        # print(f"{call_api.counter} API calls", file=sys.stderr)
     except SingleInstanceException as e:
         sys.exit(e)
     except KeyboardInterrupt:
