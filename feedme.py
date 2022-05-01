@@ -306,8 +306,6 @@ def main():
 
     with httpx.Client() as client:
 
-        client.get.counter = 0
-
         for listing in get_listings(client, search_urls, last_updated):
             if include_in_feed(listing, listing_ids):
                 listing_ids.add(listing.id)
