@@ -70,7 +70,7 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
                 "https://svcs.ebay.com/services/search/FindingService/v1",
                 params=(headers | search_params),
             )
-            client.get.counter += 1
+            call_api.counter += 1
             if not r.status_code == 200:
                 raise APIException(f"GET {r.url} failed ({r.status_code})")
             o = r.json()["findItemsAdvancedResponse"][0]
@@ -85,6 +85,9 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
                 raise APIException(f"API call failed ({e})")
             else:
                 time.sleep(60)
+
+
+call_api.counter = 0
 
 
 def add_category(path: str, d: dict[str, str]):
@@ -319,8 +322,6 @@ def main():
                 if entry_count > MAX_FEED_ENTRIES:
                     break
 
-        print(f"{client.get.counter} API calls", file=sys.stderr)
-
     copy_remaining_entries(existing_feed, fg, entry_count, listing_ids)
     fg.atom_file(f"{args.feed}.new", pretty=True)
     os.rename(f"{args.feed}.new", args.feed)
@@ -330,6 +331,7 @@ if __name__ == "__main__":
     try:
         me = SingleInstance()
         main()
+        print(f"{call_api.counter} API calls", file=sys.stderr)
     except SingleInstanceException as e:
         sys.exit(e)
     except KeyboardInterrupt:
