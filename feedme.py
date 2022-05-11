@@ -244,7 +244,7 @@ def copy_entry(entry: AtomEntry, fg: FeedGenerator) -> None:
     fe.id(entry.id_)
     fe.title(entry.title.value)
     fe.updated((entry.updated or now()).isoformat())
-    fe.link(href=entry.id_)
+    fe.link(href=entry.links[0].href)
     fe.content(entry.content.value, type="html")
 
 
