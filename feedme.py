@@ -245,14 +245,16 @@ def copy_entry(entry: AtomEntry, fg: FeedGenerator) -> None:
     fe.title(entry.title.value)
     fe.updated((entry.updated or now()).isoformat())
     fe.link(href=entry.links[0].href)
-    fe.content(entry.content.value, type="html")
+    if entry.content:
+        fe.content(entry.content.value, type="html")
 
 
 tag_uri = re.compile(r"tag:feedme.aeshin.org,2022:item-(\d+)")
 
 
-def parse_listing_id(entry_id: str) -> str:
-    return tag_uri.match(entry_id).group(1)
+def parse_listing_id(entry_id: str) -> Optional[str]:
+    m = tag_uri.match(entry_id)
+    return m.group(1) if m else None
 
 
 def copy_remaining_entries(
@@ -262,7 +264,7 @@ def copy_remaining_entries(
         for entry in feed.entries:
             listing_id = parse_listing_id(entry.id_)
             if entry_count < MAX_FEED_ENTRIES:
-                if listing_id not in listing_ids:
+                if listing_id and listing_id not in listing_ids:
                     copy_entry(entry, fg)
                     entry_count += 1
             else:
