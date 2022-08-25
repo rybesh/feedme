@@ -333,6 +333,6 @@ if __name__ == "__main__":
         main()
         # print(f"{call_api.counter} API calls", file=sys.stderr)
     except SingleInstanceException as e:
-        sys.exit(e)
+        sys.exit(str(e))
     except KeyboardInterrupt:
         sys.exit(0)
