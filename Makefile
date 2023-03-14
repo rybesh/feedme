@@ -5,6 +5,8 @@ APP := feedme
 REGION := iad
 .DEFAULT_GOAL := run
 
+include .env
+
 $(PYTHON):
 	python3 -m venv venv
 	$(PIP) install --upgrade pip
@@ -12,9 +14,6 @@ $(PYTHON):
 	$(PIP) install -r requirements.txt
 
 run: $(PYTHON)
-	set -o allexport
-	source .env
-	set +o allexport
 	time ./feedme.py searches.txt atom.xml
 
 launch:
@@ -34,7 +33,11 @@ secrets:
 	@echo "Next: make deploy"
 
 deploy:
-	fly deploy
+	@fly deploy \
+	--build-secret APP_ID=$(APP_ID) \
+	--build-secret FEED_URL=$(FEED_URL) \
+	--build-secret FEED_AUTHOR_NAME=$(FEED_AUTHOR_NAME) \
+	--build-secret FEED_AUTHOR_EMAIL=$(FEED_AUTHOR_EMAIL)
 
 clean:
 	rm -rf venv atom.xml
