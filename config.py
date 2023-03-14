@@ -44,19 +44,22 @@ class Config:
                 raise ConfigError(f"The {field} field is required")
 
             var_type = get_type_hints(Config)[field]
+            raw_value = env.get(field, default_value)
 
             try:
                 if var_type == bool:
-                    value = _parse_bool(env.get(field, default_value))
+                    value = _parse_bool(raw_value)
+                elif var_type == str:
+                    value = str(raw_value.strip("'"))
                 else:
-                    value = var_type(env.get(field, default_value))
+                    value = var_type(raw_value)
 
                 setattr(self, field, value)
 
             except ValueError as e:
                 raise ConfigError(
                     'Unable to cast value of "{}" to type "{}" for "{}" field'.format(
-                        env[field], var_type, field
+                        raw_value, var_type, field
                     )
                 ) from e
 
