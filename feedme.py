@@ -16,18 +16,12 @@ from tendo.singleton import SingleInstance, SingleInstanceException
 from typing import Optional, NamedTuple, Iterator
 from urllib.parse import urlparse, parse_qs
 
-from config import (
-    APP_ID,
-    FEED_URL,
-    FEED_AUTHOR,
-    MAX_FEED_ENTRIES,
-    MAX_LISTING_AGE_DAYS,
-)
+from config import config
 
 headers = {
     "OPERATION-NAME": "findItemsAdvanced",
     "SERVICE-VERSION": "1.13.0",
-    "SECURITY-APPNAME": APP_ID,
+    "SECURITY-APPNAME": config.APP_ID,
     "RESPONSE-DATA-FORMAT": "JSON",
     "REST-PAYLOAD": "",
 }
@@ -82,7 +76,7 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
         except httpx.RequestError as e:
             tries += 1
             if tries > 10:
-                raise APIException(f"API call failed ({e})")
+                raise APIException(f"API call failed ({e})") from e
             else:
                 time.sleep(60)
 
@@ -263,7 +257,7 @@ def copy_remaining_entries(
     if feed is not None:
         for entry in feed.entries:
             listing_id = parse_listing_id(entry.id_)
-            if entry_count < MAX_FEED_ENTRIES:
+            if entry_count < config.MAX_FEED_ENTRIES:
                 if listing_id and listing_id not in listing_ids:
                     copy_entry(entry, fg)
                     entry_count += 1
@@ -275,7 +269,7 @@ def include_in_feed(listing: Listing, listing_ids: set[str]) -> bool:
     return (
         listing.id not in listing_ids
         and listing.active
-        and listing.age_in_days <= MAX_LISTING_AGE_DAYS
+        and listing.age_in_days <= config.MAX_LISTING_AGE_DAYS
     )
 
 
@@ -297,17 +291,16 @@ def main():
                 last_updated = entry.updated
 
     fg = FeedGenerator()
-    fg.id(FEED_URL)
+    fg.id(config.FEED_URL)
     fg.title("eBay Searches")
     fg.updated(now())
-    fg.link(href=FEED_URL, rel="self")
-    fg.author(FEED_AUTHOR)
+    fg.link(href=config.FEED_URL, rel="self")
+    fg.author({"name": config.FEED_AUTHOR_NAME, "email": config.FEED_AUTHOR_EMAIL})
 
     with open(args.searches) as f:
         search_urls = [line.strip() for line in f]
 
     with httpx.Client() as client:
-
         for listing in get_listings(client, search_urls, last_updated):
             if include_in_feed(listing, listing_ids):
                 listing_ids.add(listing.id)
@@ -319,7 +312,7 @@ def main():
                 fe.content(describe(listing), type="html")
 
                 entry_count += 1
-                if entry_count > MAX_FEED_ENTRIES:
+                if entry_count > config.MAX_FEED_ENTRIES:
                     break
 
     copy_remaining_entries(existing_feed, fg, entry_count, listing_ids)

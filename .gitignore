@@ -1,5 +1,5 @@
+.env
 __pycache__
 atom.xml
-config.py
 searches.txt
 venv
