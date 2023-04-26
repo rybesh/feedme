@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from typing import get_type_hints, Union
+from typing import get_type_hints
 
 # load environment variables from .env file
 load_dotenv()
@@ -8,13 +8,6 @@ load_dotenv()
 
 class ConfigError(Exception):
     pass
-
-
-def _parse_bool(val: Union[str, bool]) -> bool:
-    if type(val) == bool:
-        return bool(val)
-    else:
-        return str(val).lower() in ["true", "yes", "1"]
 
 
 class Config:
@@ -47,9 +40,7 @@ class Config:
             raw_value = env.get(field, default_value)
 
             try:
-                if var_type == bool:
-                    value = _parse_bool(raw_value)
-                elif var_type == str:
+                if var_type == str:
                     value = str(raw_value.strip("'"))
                 else:
                     value = var_type(raw_value)
