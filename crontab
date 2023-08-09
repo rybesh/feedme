@@ -1,1 +1,1 @@
-*/20 * * * * python3 /feedme.py /searches.txt /srv/http/index.xml
+*/20 * * * * /venv/bin/python /feedme.py /searches.txt /srv/http/index.xml
