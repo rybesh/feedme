@@ -11,8 +11,11 @@ $(PYTHON):
 	$(PIP) install wheel
 	$(PIP) install -r requirements.txt
 
-run: $(PYTHON)
-	time ./feedme.py searches.txt atom.xml
+searches.txt: searches-manual.txt searches-automatic.txt
+	cat $^ > $@
+
+run: searches.txt | $(PYTHON)
+	time ./feedme.py $< atom.xml
 
 launch:
 	fly launch \
@@ -39,6 +42,6 @@ deploy:
 	--build-secret FEED_AUTHOR_EMAIL="$$FEED_AUTHOR_EMAIL"
 
 clean:
-	rm -rf venv atom.xml
+	rm -rf venv atom.xml searches.txt
 
 .PHONY: run launch secrets deploy clean

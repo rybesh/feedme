@@ -8,13 +8,16 @@ import os
 import re
 import sys
 import time
+import pickle
+
 from atoma.atom import AtomEntry, AtomFeed
 from datetime import datetime, timezone, timedelta
 from feedgen.feed import FeedGenerator
 from ratelimit import limits, sleep_and_retry
 from tendo.singleton import SingleInstance, SingleInstanceException
-from typing import Optional, NamedTuple, Iterator
+from typing import Optional, NamedTuple, Iterator, Any
 from urllib.parse import urlparse, parse_qs
+from json.decoder import JSONDecodeError
 
 from config import config
 
@@ -45,6 +48,11 @@ class APIException(Exception):
         super().__init__(message)
 
 
+class TooManyAPICallsException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 class BadSearchURLException(Exception):
     def __init__(self, message: str):
         super().__init__(message)
@@ -52,6 +60,10 @@ class BadSearchURLException(Exception):
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def log(x: Any) -> None:
+    print(x, file=sys.stderr)
 
 
 @sleep_and_retry
@@ -64,9 +76,28 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
                 "https://svcs.ebay.com/services/search/FindingService/v1",
                 params=(headers | search_params),
             )
+
             call_api.counter += 1
+
             if not r.status_code == 200:
-                raise APIException(f"GET {r.url} failed ({r.status_code})")
+                message_parts = [f"GET {r.url} failed ({r.status_code})"]
+                try:
+                    upstream_message = r.json()["errorMessage"][0]["error"][0][
+                        "message"
+                    ][0]
+                    if (
+                        upstream_message
+                        == "Service call has exceeded the number of times the operation is allowed to be called"
+                    ):
+                        raise TooManyAPICallsException(
+                            f"Too many API calls ({call_api.counter}) within 24 hours"
+                        )
+                    else:
+                        message_parts.append(upstream_message)
+                except (KeyError, JSONDecodeError):
+                    pass
+                raise APIException("\n".join(message_parts))
+
             o = r.json()["findItemsAdvancedResponse"][0]
             if not o["ack"][0] == "Success":
                 raise APIException(
@@ -196,17 +227,63 @@ def item_to_listing(item: dict, search_params: dict[str, str]) -> Listing:
     )
 
 
+NEXT_URL_PICKLE = "next-url.pickle"
+
+
+def load_next_url() -> str | None:
+    try:
+        with open(NEXT_URL_PICKLE, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def save_next_url(next_url: str) -> None:
+    with open(NEXT_URL_PICKLE, "wb") as f:
+        pickle.dump(next_url, f, pickle.HIGHEST_PROTOCOL)
+
+
+def clear_next_url() -> None:
+    try:
+        os.remove(NEXT_URL_PICKLE)
+    except OSError:
+        pass
+
+
 def get_listings(
     client: httpx.Client, search_urls: list[str], last_updated: datetime
 ) -> Iterator[Listing]:
-    for url in search_urls:
-        try:
-            for item, search_params in get_results(client, url, last_updated):
-                yield item_to_listing(item, search_params)
-        except APIException as e:
-            print(e, file=sys.stderr)
-        except BadSearchURLException as e:
-            print(e, file=sys.stderr)
+    last_url = None
+    next_url = load_next_url()
+
+    if next_url is None:
+        log(f"Beginning listings search with {len(search_urls)} urls")
+
+    try:
+        for i, url in enumerate(search_urls, start=1):
+            last_url = url
+
+            if next_url is not None:
+                if url == next_url:
+                    next_url = None
+                    log(f"Resuming listings search with url #{i} of {len(search_urls)}")
+                else:
+                    # skip until we get to next_url
+                    continue
+
+            try:
+                for item, search_params in get_results(client, url, last_updated):
+                    yield item_to_listing(item, search_params)
+            except (BadSearchURLException, APIException) as e:
+                log(e)
+
+        log("Completed listings search")
+        clear_next_url()
+
+    except TooManyAPICallsException as e:
+        log(e)
+        if last_url is not None:
+            save_next_url(last_url)
 
 
 def describe(listing: Listing) -> str:
@@ -315,6 +392,8 @@ def main():
                 if entry_count > config.MAX_FEED_ENTRIES:
                     break
 
+    log(f"Added {entry_count} items to feed")
+
     copy_remaining_entries(existing_feed, fg, entry_count, listing_ids)
     fg.atom_file(f"{args.feed}.new", pretty=True)
     os.rename(f"{args.feed}.new", args.feed)
@@ -324,7 +403,6 @@ if __name__ == "__main__":
     try:
         me = SingleInstance()
         main()
-        # print(f"{call_api.counter} API calls", file=sys.stderr)
     except SingleInstanceException as e:
         sys.exit(str(e))
     except KeyboardInterrupt:

@@ -1,1 +1,1 @@
-*/20 * * * * /venv/bin/python /feedme.py /searches.txt /srv/http/index.xml
+6 6 * * * /venv/bin/python /feedme.py /searches.txt /srv/http/index.xml
