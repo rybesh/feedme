@@ -11,27 +11,13 @@ $(PYTHON):
 	$(PIP) install wheel
 	$(PIP) install -r requirements.txt
 
-searches.txt: searches-manual.txt searches-automatic.txt
-	cat $^ > $@
-
-run: searches.txt | $(PYTHON)
-	time ./feedme.py $< atom.xml
-
-launch:
-	fly launch \
-	--auto-confirm \
-	--copy-config \
-	--ignorefile .dockerignore \
-	--dockerfile Dockerfile \
-	--region $(REGION) \
-	--name $(APP)
-	@echo "Next: make secrets"
+run: searches.txt searches.pickle | $(PYTHON)
+	time ./feedme.py $^ index.xml
 
 secrets:
 	cat .env | fly secrets import
 	@echo
 	fly secrets list
-	@echo "Next: make deploy"
 
 deploy:
 	source .env && \
@@ -42,6 +28,6 @@ deploy:
 	--build-secret FEED_AUTHOR_EMAIL="$$FEED_AUTHOR_EMAIL"
 
 clean:
-	rm -rf venv atom.xml searches.txt
+	rm -rf venv
 
 .PHONY: run launch secrets deploy clean

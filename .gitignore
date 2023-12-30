@@ -1,6 +1,6 @@
+*.pickle
 .env
 __pycache__
-atom.xml
-searches*.txt
+index.xml
+searches.txt
 venv
-*.pickle

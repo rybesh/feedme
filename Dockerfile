@@ -19,6 +19,7 @@ RUN set -ex && \
 COPY feedme.py /
 COPY config.py /
 COPY searches.txt /
+COPY searches.pickle /
 RUN mkdir -p /srv/http
 RUN --mount=type=secret,id=APP_ID \
     --mount=type=secret,id=FEED_URL \
