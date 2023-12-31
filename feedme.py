@@ -221,15 +221,15 @@ def item_to_listing(
     start_time = datetime.fromisoformat(
         item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
     )
+
+    shipping_price = None
     match item["shippingInfo"][0]["shippingType"][0]:
         case "Flat":
-            shipping_price = item["shippingInfo"][0]["shippingServiceCost"][0][
-                "__value__"
-            ]
-        case _:
-            shipping_price = None
+            if "shippingServiceCost" in item["shippingInfo"][0]:
+                shipping_price = float(
+                    item["shippingInfo"][0]["shippingServiceCost"][0]["__value__"]
+                )
 
-    print(item["shippingInfo"], file=sys.stderr)
     return Listing(
         item["itemId"][0],
         item["viewItemURL"][0],
@@ -272,7 +272,7 @@ def clear_next_url() -> None:
 
 def get_listings(
     client: httpx.Client,
-    search_urls: dict[str, PriceSuggestions],
+    search_urls: list[tuple[str, PriceSuggestions]],
     last_updated: datetime,
 ) -> Iterator[Listing]:
     last_url = None
@@ -282,7 +282,7 @@ def get_listings(
         log(f"Beginning listings search with {len(search_urls)} urls")
 
     try:
-        for i, url in enumerate(sorted(search_urls.keys()), start=1):
+        for i, (url, price_suggestions) in enumerate(search_urls, start=1):
             last_url = url
 
             if next_url is not None:
@@ -295,7 +295,7 @@ def get_listings(
 
             try:
                 for item, search_params in get_results(client, url, last_updated):
-                    yield item_to_listing(item, search_params, search_urls[url])
+                    yield item_to_listing(item, search_params, price_suggestions)
             except (BadSearchURLException, APIException) as e:
                 log(e)
 
@@ -315,9 +315,7 @@ def describe(listing: Listing) -> str:
     )
     for condition in ("VGP", "NM"):
         if condition in listing.price_suggestions:
-            description += (
-                f"<p>suggested price ({condition}): ${listing.shipping_price:.2f}</p>"
-            )
+            description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
     description += f'<img src="{listing.image_url}"/>'
     if "keywords" in listing.search_params:
         description += f"<p>{html.escape(listing.search_params['keywords'])}</p>"
@@ -414,7 +412,7 @@ def main():
 
     with open(args.searches) as f:
         for url in [line.strip() for line in f]:
-            search_urls[url] = {}  # empty price suggestions
+            search_urls.append({"search_url": url, "price_suggestions": {}})
 
     with httpx.Client() as client:
         for listing in get_listings(client, search_urls, last_updated):
