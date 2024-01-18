@@ -22,6 +22,7 @@ secrets:
 deploy: ../deals/searches.pickle searches.txt
 	cp $< searches.pickle
 	source .env && \
+	caffeinate -s \
 	fly deploy \
 	--build-secret APP_ID="$$APP_ID" \
 	--build-secret FEED_URL="$$FEED_URL" \
