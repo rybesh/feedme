@@ -19,7 +19,8 @@ secrets:
 	@echo
 	fly secrets list
 
-deploy:
+deploy: ../deals/searches.pickle searches.txt
+	cp $< searches.pickle
 	source .env && \
 	fly deploy \
 	--build-secret APP_ID="$$APP_ID" \
@@ -28,6 +29,6 @@ deploy:
 	--build-secret FEED_AUTHOR_EMAIL="$$FEED_AUTHOR_EMAIL"
 
 clean:
-	rm -rf venv
+	rm -rf venv searches.pickle
 
 .PHONY: run launch secrets deploy clean
