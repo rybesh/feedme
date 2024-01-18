@@ -11,13 +11,19 @@ $(PYTHON):
 	$(PIP) install wheel
 	$(PIP) install -r requirements.txt
 
-run: searches.txt searches.pickle | $(PYTHON)
-	time ./feedme.py $^ index.xml
+run: ../deals/searches.pickle searches.txt | $(PYTHON)
+	cp $< searches.pickle
+	time ./feedme.py searches.txt searches.pickle index.xml
 
 secrets:
 	cat .env | fly secrets import
 	@echo
 	fly secrets list
+
+update_searches: ../deals/searches.pickle searches.txt
+	cp $< searches.pickle
+	rsync searches.txt $(APP).internal:searches.txt
+	rsync searches.pickle $(APP).internal:searches.pickle
 
 deploy: ../deals/searches.pickle searches.txt
 	cp $< searches.pickle
