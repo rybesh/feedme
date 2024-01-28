@@ -313,6 +313,8 @@ def describe(listing: Listing) -> str:
         f"<p>${listing.price:.2f}{' (BIN)' if listing.buy_it_now else ''}</p>"
         f"<p>ships from {listing.country}</p>"
     )
+    if listing.shipping_price is not None:
+        description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
     for condition in ("VGP", "NM"):
         if condition in listing.price_suggestions:
             description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
@@ -333,8 +335,6 @@ def describe(listing: Listing) -> str:
         description += (
             f"<p>{html.escape(listing.search_params['itemFilter(0).value'])}</p>"
         )
-    if listing.shipping_price is not None:
-        description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
     return description
 
 
