@@ -64,6 +64,11 @@ class BadSearchURLException(Exception):
         super().__init__(message)
 
 
+class TimeLimitException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -274,6 +279,7 @@ def get_listings(
     client: httpx.Client,
     search_urls: list[tuple[str, PriceSuggestions]],
     last_updated: datetime,
+    minutes: int | None = None,
 ) -> Iterator[Listing]:
     last_url = None
     next_url = load_next_url()
@@ -282,6 +288,8 @@ def get_listings(
         log(f"Beginning listings search with {len(search_urls)} urls")
 
     try:
+        start = time.time()
+
         for i, (url, price_suggestions) in enumerate(search_urls, start=1):
             last_url = url
 
@@ -299,11 +307,17 @@ def get_listings(
             except (BadSearchURLException, APIException) as e:
                 log(e)
 
+            elapsed = time.time() - start
+            if minutes and ((elapsed / 60) > minutes):
+                raise TimeLimitException(f"Elapsed time exceeded {minutes} minutes")
+
         log("Completed listings search")
         clear_next_url()
+        last_url = None
 
-    except TooManyAPICallsException as e:
+    except (TooManyAPICallsException, TimeLimitException) as e:
         log(e)
+    finally:
         if last_url is not None:
             save_next_url(last_url)
 
@@ -381,6 +395,12 @@ def include_in_feed(listing: Listing, listing_ids: set[str]) -> bool:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "-m",
+        "--minutes",
+        type=int,
+        help="number of minutes to run before exiting",
+    )
+    parser.add_argument(
         "searches", help="text file with manually edited eBay search URLs"
     )
     parser.add_argument(
@@ -415,7 +435,9 @@ def main():
             search_urls.append({"search_url": url, "price_suggestions": {}})
 
     with httpx.Client() as client:
-        for listing in get_listings(client, search_urls, last_updated):
+        for listing in get_listings(
+            client, search_urls, last_updated, minutes=args.minutes
+        ):
             if include_in_feed(listing, listing_ids):
                 listing_ids.add(listing.id)
                 fe = fg.add_entry(order="append")

@@ -19,7 +19,7 @@ RUN set -ex && \
 COPY feedme.py /
 COPY config.py /
 COPY searches.txt /
-COPY searches.pickle /
+RUN curl http://deals.internal:8043/searches.pickle -o /searches.pickle
 RUN mkdir -p /srv/http
 RUN --mount=type=secret,id=APP_ID \
     --mount=type=secret,id=FEED_URL \
@@ -29,7 +29,9 @@ RUN --mount=type=secret,id=APP_ID \
     FEED_URL="$(cat /run/secrets/FEED_URL)" \
     FEED_AUTHOR_NAME="$(cat /run/secrets/FEED_AUTHOR_NAME)" \
     FEED_AUTHOR_EMAIL="$(cat /run/secrets/FEED_AUTHOR_EMAIL)" \
-    /venv/bin/python /feedme.py /searches.txt /searches.pickle /srv/http/index.xml
+    /venv/bin/python /feedme.py \
+    --minutes 1 \
+    /searches.txt /searches.pickle /srv/http/index.xml
 
 # install supercronic and crontab
 
