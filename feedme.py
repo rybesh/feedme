@@ -15,11 +15,13 @@ from datetime import datetime, timezone, timedelta
 from feedgen.feed import FeedGenerator
 from ratelimit import limits, sleep_and_retry
 from tendo.singleton import SingleInstance, SingleInstanceException
-from typing import Optional, NamedTuple, Iterator, Any, TypeAlias
+from typing import Optional, NamedTuple, Iterator, Any, TypeAlias, cast
 from urllib.parse import urlparse, parse_qs
 from json.decoder import JSONDecodeError
 
 from config import config
+
+ITEMS_PAGE_SIZE = 200
 
 headers = {
     "OPERATION-NAME": "findItemsAdvanced",
@@ -79,6 +81,51 @@ def log(x: Any) -> None:
 
 @sleep_and_retry
 @limits(calls=1, period=1)
+def new_call_api(
+    client: httpx.Client, search_params: dict[str, str | dict[str, str]]
+) -> dict:
+    tries = 0
+    while True:
+        try:
+            r = client.get(
+                "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                params=(headers | search_params),
+            )
+
+            new_call_api.counter += 1
+
+            if not r.status_code == 200:
+                message_parts = [f"GET {r.url} failed ({r.status_code})"]
+                try:
+                    for e in r.json().get("errors", []):
+                        message_parts.append(e["message"])
+                        if e["category"] == "REQUEST" and e["errorId"] == 2001:
+                            raise TooManyAPICallsException(
+                                f"Too many API calls ({new_call_api.counter}) within 24 hours"
+                            )
+                except (KeyError, JSONDecodeError):
+                    pass
+                raise APIException("\n".join(message_parts))
+
+            o = r.json()
+            for w in o.get("warnings", []):
+                log(f"{w['category']} ({w['errorId']}) {w['message']}")
+
+            return o
+
+        except httpx.RequestError as e:
+            tries += 1
+            if tries > 10:
+                raise APIException(f"API call failed ({e})") from e
+            else:
+                time.sleep(60)
+
+
+new_call_api.counter = 0
+
+
+@sleep_and_retry
+@limits(calls=1, period=1)
 def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
     tries = 0
     while True:
@@ -131,56 +178,47 @@ def add_category(path: str, d: dict[str, str]):
     if len(parts) == 3:
         pass
     elif len(parts) == 5:
-        d["categoryId"] = parts[3]
+        d["category_ids"] = parts[3]
     else:
         raise BadSearchURLException(f"Cannot handle path:\n{path}")
 
 
 def add_keywords(params: dict[str, list[str]], d: dict[str, str]):
     if "_nkw" in params:
-        d["keywords"] = params["_nkw"][0]
-    if "LH_TitleDesc" in params and params["LH_TitleDesc"] == "1":
-        d["descriptionSearch"] = "true"
+        d["q"] = params["_nkw"][0]
 
 
-def add_location_preference(params: dict[str, list[str]], d: dict[str, str]):
+def add_location_preference(
+    params: dict[str, list[str]], d: dict[str, str | dict[str, str]]
+):
     if "LH_PrefLoc" in params:
-        d["itemFilter.name"] = "LocatedIn"
+        filters: dict[str, str] = cast(dict[str, str], d.get("filter", {}))
         if params["LH_PrefLoc"][0] == "1":
-            d["itemFilter.value"] = "US"
+            filters["itemLocationCountry"] = "US"
         elif params["LH_PrefLoc"][0] == "2":
-            d["itemFilter.value"] = "WorldWide"
+            filters["itemLocationRegion"] = "WORLDWIDE"
         elif params["LH_PrefLoc"][0] == "3":
-            d["itemFilter.value"] = "North America"
+            # not possible to narrow to North America
+            filters["itemLocationCountry"] = "US"
         else:
             raise BadSearchURLException(
                 f"Cannot handle location preference:\n{params['LH_PrefLoc'][0]}"
             )
+        d["filters"] = filters
 
 
-def add_seller(params: dict[str, list[str]], d: dict[str, str]):
+def add_seller(params: dict[str, list[str]], d: dict[str, str | dict[str, str]]):
     if "_ssn" in params:
-        d["itemFilter.name"] = "Seller"
-        d["itemFilter.value"] = params["_ssn"][0]
+        filters: dict[str, str] = cast(dict[str, str], d.get("filter", {}))
+        filters["sellers"] = "{" + params["_ssn"][0] + "}"
+        d["filters"] = filters
 
 
-def add_mod_time_from(last_updated: datetime, d: dict[str, str]):
-    mod_time_from = last_updated.isoformat().replace("+00:00", "Z")
-    if "itemFilter.name" in d:
-        d["itemFilter(0).name"] = d.pop("itemFilter.name")
-        d["itemFilter(0).value"] = d.pop("itemFilter.value")
-        d["itemFilter(1).name"] = "ModTimeFrom"
-        d["itemFilter(1).value"] = mod_time_from
-    else:
-        d["itemFilter.name"] = "ModTimeFrom"
-        d["itemFilter.value"] = mod_time_from
-
-
-def parse_search_params(url: str) -> dict[str, str]:
+def parse_search_params(url: str) -> dict[str, str | dict[str, str]]:
     d = {
-        "sortOrder": "StartTimeNewest",
-        "outputSelector": "PictureURLSuperSize",
-        "paginationInput.entriesPerPage": "100",
+        "filter": {"buyingOptions": "{AUCTION|FIXED_PRICE}"},
+        "limit": f"{ITEMS_PAGE_SIZE}",
+        "sort": "newlyListed",
     }
     o = urlparse(url)
     params = parse_qs(o.query)
@@ -192,32 +230,25 @@ def parse_search_params(url: str) -> dict[str, str]:
         add_seller(params, d)
     else:
         raise BadSearchURLException(f"Cannot handle url:\n{url}")
+    # from pprint import pprint
+
+    # pprint(d, stream=sys.stderr)
     return d
-
-
-def get_next_page(response: dict) -> Optional[int]:
-    page_number = int(response["paginationOutput"][0]["pageNumber"][0])
-    total_pages = int(response["paginationOutput"][0]["totalPages"][0])
-    if page_number < total_pages:
-        return page_number + 1
-    else:
-        return None
 
 
 def get_results(
     client: httpx.Client, search_url: str, last_updated: datetime
-) -> Iterator[tuple[dict, dict[str, str]]]:
+) -> Iterator[tuple[dict, dict[str, str | dict[str, str]]]]:
     search_params = parse_search_params(search_url)
-    add_mod_time_from(last_updated, search_params)
+    filters: dict[str, str] = cast(dict[str, str], search_params.get("filter", {}))
+    filters["itemStartDate"] = f"[{last_updated.isoformat().replace('+00:00', 'Z')}]"
+    search_params["filter"] = filters
     while True:
-        response = call_api(client, search_params)
-        for item in response["searchResult"][0].get("item", []):
+        response = new_call_api(client, search_params)
+        for item in response["itemSummaries"]:
             yield item, search_params.copy()
-        next_page = get_next_page(response)
-        if next_page is None:
-            break
-        else:
-            search_params["paginationInput.pageNumber"] = str(next_page)
+        if "next" in response:
+            search_params["offset"] = str(response["offset"] + ITEMS_PAGE_SIZE)
 
 
 def item_to_listing(
