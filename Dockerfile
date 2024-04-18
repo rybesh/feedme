@@ -19,6 +19,7 @@ RUN set -ex && \
 COPY feedme.py /
 COPY config.py /
 COPY searches.txt /
+COPY update-feed.sh /
 RUN curl http://deals.internal:8043/searches.pickle -o /searches.pickle
 RUN mkdir -p /srv/http
 RUN --mount=type=secret,id=APP_ID \
