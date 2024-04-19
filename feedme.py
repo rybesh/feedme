@@ -47,6 +47,7 @@ class Listing(NamedTuple):
     buy_it_now: bool
     search_params: dict[str, str]
     price_suggestions: PriceSuggestions
+    release_id: int | None
 
 
 class APIException(Exception):
@@ -221,7 +222,10 @@ def get_results(
 
 
 def item_to_listing(
-    item: dict, search_params: dict[str, str], price_suggestions: PriceSuggestions
+    item: dict,
+    search_params: dict[str, str],
+    price_suggestions: PriceSuggestions,
+    release_id: int | None,
 ) -> Listing:
     start_time = datetime.fromisoformat(
         item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
@@ -249,6 +253,7 @@ def item_to_listing(
         item["listingInfo"][0]["listingType"][0] in ("AuctionWithBIN", "FixedPrice"),
         search_params,
         price_suggestions,
+        release_id,
     )
 
 
@@ -277,7 +282,7 @@ def clear_next_url() -> None:
 
 def get_listings(
     client: httpx.Client,
-    search_urls: list[tuple[str, PriceSuggestions]],
+    search_urls: list[tuple[str, PriceSuggestions, int | None]],
     last_updated: datetime,
     minutes: int | None = None,
 ) -> Iterator[Listing]:
@@ -290,7 +295,7 @@ def get_listings(
     try:
         start = time.time()
 
-        for i, (url, price_suggestions) in enumerate(search_urls, start=1):
+        for i, (url, price_suggestions, release_id) in enumerate(search_urls, start=1):
             last_url = url
 
             if next_url is not None:
@@ -303,7 +308,9 @@ def get_listings(
 
             try:
                 for item, search_params in get_results(client, url, last_updated):
-                    yield item_to_listing(item, search_params, price_suggestions)
+                    yield item_to_listing(
+                        item, search_params, price_suggestions, release_id
+                    )
             except (BadSearchURLException, APIException) as e:
                 log(e)
 
@@ -348,6 +355,11 @@ def describe(listing: Listing) -> str:
     ):
         description += (
             f"<p>{html.escape(listing.search_params['itemFilter(0).value'])}</p>"
+        )
+    if listing.release_id is not None:
+        description += (
+            f'<p><a href="https://www.discogs.com/release/{listing.release_id}">'
+            f"https://www.discogs.com/release/{listing.release_id}</p>"
         )
     return description
 
@@ -432,7 +444,7 @@ def main():
 
     with open(args.searches) as f:
         for url in [line.strip() for line in f]:
-            search_urls.append({"search_url": url, "price_suggestions": {}})
+            search_urls.append((url, {}, None))
 
     with httpx.Client() as client:
         for listing in get_listings(
