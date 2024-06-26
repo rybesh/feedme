@@ -1,4 +1,5 @@
 import os
+import inspect
 from dotenv import load_dotenv
 from typing import get_type_hints
 
@@ -12,6 +13,7 @@ class ConfigError(Exception):
 
 class Config:
     APP_ID: str
+    CERT_ID: str
     FEED_URL: str
     FEED_AUTHOR_NAME: str
     FEED_AUTHOR_EMAIL: str
@@ -26,8 +28,7 @@ class Config:
     """
 
     def __init__(self, env):
-        # annotations = inspect.get_annotations(Config)  python 3.10 and up
-        annotations = Config.__annotations__
+        annotations = inspect.get_annotations(Config)
         for field in annotations:
             if not field.isupper():
                 continue

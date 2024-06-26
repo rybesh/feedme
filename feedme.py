@@ -11,24 +11,18 @@ import time
 import pickle
 
 from atoma.atom import AtomEntry, AtomFeed
+from base64 import b64encode
 from datetime import datetime, timezone, timedelta
 from feedgen.feed import FeedGenerator
 from ratelimit import limits, sleep_and_retry
 from tendo.singleton import SingleInstance, SingleInstanceException
-from typing import Optional, NamedTuple, Iterator, Any, TypeAlias
-from urllib.parse import urlparse, parse_qs
+from typing import Optional, NamedTuple, Iterator, Any, TypeAlias, cast
+from urllib.parse import urlparse, parse_qs, quote
 from json.decoder import JSONDecodeError
 
 from config import config
 
-headers = {
-    "OPERATION-NAME": "findItemsAdvanced",
-    "SERVICE-VERSION": "1.13.0",
-    "SECURITY-APPNAME": config.APP_ID,
-    "RESPONSE-DATA-FORMAT": "JSON",
-    "REST-PAYLOAD": "",
-}
-
+ITEMS_PAGE_SIZE = 200
 
 PriceSuggestions: TypeAlias = dict[str, float]
 
@@ -39,13 +33,12 @@ class Listing(NamedTuple):
     title: str
     start_time: datetime
     age_in_days: int
-    active: bool
     image_url: str
     price: float
     shipping_price: float | None
     country: str
     buy_it_now: bool
-    search_params: dict[str, str]
+    search_params: dict[str, str | dict[str, str]]
     price_suggestions: PriceSuggestions
     release_id: int | None
 
@@ -78,15 +71,50 @@ def log(x: Any) -> None:
     print(x, file=sys.stderr)
 
 
+bearer_token = None
+
+
+def refresh_bearer_token(client: httpx.Client) -> None:
+    token = b64encode(f"{config.APP_ID}:{config.CERT_ID}\n".encode()).decode()
+    r = client.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {token}",
+        },
+        data={
+            "grant_type": "client_credentials",
+            "scope": "https://api.ebay.com/oauth/api_scope",
+        },
+    )
+    o = r.json()
+    global bearer_token
+    bearer_token = o["access_token"]
+
+
 @sleep_and_retry
 @limits(calls=1, period=1)
-def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
+def call_api(
+    client: httpx.Client,
+    search_params: dict[str, str | dict[str, str]],
+) -> dict:
+    query_params = {}
+    for key, value in search_params.items():
+        if isinstance(value, dict):
+            query_params[key] = ",".join([f"{k}:{v}" for k, v in value.items()])
+        else:
+            query_params[key] = value
+
+    if bearer_token is None:
+        refresh_bearer_token(client)
+
     tries = 0
     while True:
         try:
             r = client.get(
-                "https://svcs.ebay.com/services/search/FindingService/v1",
-                params=(headers | search_params),
+                "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                params=query_params,
+                headers={"Authorization": f"Bearer {bearer_token}"},
             )
 
             call_api.counter += 1
@@ -94,28 +122,22 @@ def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
             if not r.status_code == 200:
                 message_parts = [f"GET {r.url} failed ({r.status_code})"]
                 try:
-                    upstream_message = r.json()["errorMessage"][0]["error"][0][
-                        "message"
-                    ][0]
-                    if (
-                        upstream_message
-                        == "Service call has exceeded the number of times the operation is allowed to be called"
-                    ):
-                        raise TooManyAPICallsException(
-                            f"Too many API calls ({call_api.counter}) within 24 hours"
-                        )
-                    else:
-                        message_parts.append(upstream_message)
+                    for e in r.json().get("errors", []):
+                        message_parts.append(e["message"])
+                        if e["category"] == "REQUEST" and e["errorId"] == 2001:
+                            raise TooManyAPICallsException(
+                                f"Too many API calls ({call_api.counter}) within 24 hours"
+                            )
                 except (KeyError, JSONDecodeError):
                     pass
                 raise APIException("\n".join(message_parts))
 
-            o = r.json()["findItemsAdvancedResponse"][0]
-            if not o["ack"][0] == "Success":
-                raise APIException(
-                    f"GET {r.url}:\nfindItemsAdvancedResponse ack was {o['ack'][0]}"
-                )
+            o = r.json()
+            for w in o.get("warnings", []):
+                log(f"{w['category']} ({w['errorId']}) {w['message']}")
+
             return o
+
         except httpx.RequestError as e:
             tries += 1
             if tries > 10:
@@ -132,56 +154,40 @@ def add_category(path: str, d: dict[str, str]):
     if len(parts) == 3:
         pass
     elif len(parts) == 5:
-        d["categoryId"] = parts[3]
+        d["category_ids"] = parts[3]
     else:
         raise BadSearchURLException(f"Cannot handle path:\n{path}")
 
 
 def add_keywords(params: dict[str, list[str]], d: dict[str, str]):
     if "_nkw" in params:
-        d["keywords"] = params["_nkw"][0]
-    if "LH_TitleDesc" in params and params["LH_TitleDesc"] == "1":
-        d["descriptionSearch"] = "true"
+        d["q"] = params["_nkw"][0]
 
 
-def add_location_preference(params: dict[str, list[str]], d: dict[str, str]):
+def add_location_preference(
+    params: dict[str, list[str]], d: dict[str, str | dict[str, str]]
+):
     if "LH_PrefLoc" in params:
-        d["itemFilter.name"] = "LocatedIn"
+        filters: dict[str, str] = cast(dict[str, str], d.get("filter", {}))
         if params["LH_PrefLoc"][0] == "1":
-            d["itemFilter.value"] = "US"
+            filters["itemLocationCountry"] = "US"
         elif params["LH_PrefLoc"][0] == "2":
-            d["itemFilter.value"] = "WorldWide"
+            filters["itemLocationRegion"] = "WORLDWIDE"
         elif params["LH_PrefLoc"][0] == "3":
-            d["itemFilter.value"] = "North America"
+            # not possible to narrow to North America
+            filters["itemLocationCountry"] = "US"
         else:
             raise BadSearchURLException(
                 f"Cannot handle location preference:\n{params['LH_PrefLoc'][0]}"
             )
+        d["filters"] = filters
 
 
-def add_seller(params: dict[str, list[str]], d: dict[str, str]):
-    if "_ssn" in params:
-        d["itemFilter.name"] = "Seller"
-        d["itemFilter.value"] = params["_ssn"][0]
-
-
-def add_mod_time_from(last_updated: datetime, d: dict[str, str]):
-    mod_time_from = last_updated.isoformat().replace("+00:00", "Z")
-    if "itemFilter.name" in d:
-        d["itemFilter(0).name"] = d.pop("itemFilter.name")
-        d["itemFilter(0).value"] = d.pop("itemFilter.value")
-        d["itemFilter(1).name"] = "ModTimeFrom"
-        d["itemFilter(1).value"] = mod_time_from
-    else:
-        d["itemFilter.name"] = "ModTimeFrom"
-        d["itemFilter.value"] = mod_time_from
-
-
-def parse_search_params(url: str) -> dict[str, str]:
+def parse_search_params(url: str) -> dict[str, str | dict[str, str]]:
     d = {
-        "sortOrder": "StartTimeNewest",
-        "outputSelector": "PictureURLSuperSize",
-        "paginationInput.entriesPerPage": "100",
+        "filter": {"buyingOptions": "{AUCTION|FIXED_PRICE}"},
+        "limit": f"{ITEMS_PAGE_SIZE}",
+        "sort": "newlyListed",
     }
     o = urlparse(url)
     params = parse_qs(o.query)
@@ -189,68 +195,60 @@ def parse_search_params(url: str) -> dict[str, str]:
         add_category(o.path, d)
         add_keywords(params, d)
         add_location_preference(params, d)
-    elif o.path.endswith("m.html"):
-        add_seller(params, d)
     else:
         raise BadSearchURLException(f"Cannot handle url:\n{url}")
     return d
 
 
-def get_next_page(response: dict) -> Optional[int]:
-    page_number = int(response["paginationOutput"][0]["pageNumber"][0])
-    total_pages = int(response["paginationOutput"][0]["totalPages"][0])
-    if page_number < total_pages:
-        return page_number + 1
-    else:
-        return None
-
-
 def get_results(
     client: httpx.Client, search_url: str, last_updated: datetime
-) -> Iterator[tuple[dict, dict[str, str]]]:
+) -> Iterator[tuple[dict, dict[str, str | dict[str, str]]]]:
     search_params = parse_search_params(search_url)
-    add_mod_time_from(last_updated, search_params)
+    filters: dict[str, str] = cast(dict[str, str], search_params.get("filter", {}))
+    filters["itemStartDate"] = f"[{last_updated.isoformat().replace('+00:00', 'Z')}]"
+    search_params["filter"] = filters
     while True:
         response = call_api(client, search_params)
-        for item in response["searchResult"][0].get("item", []):
+        for item in response.get("itemSummaries", []):
             yield item, search_params.copy()
-        next_page = get_next_page(response)
-        if next_page is None:
-            break
+        if "next" in response:
+            search_params["offset"] = str(response["offset"] + ITEMS_PAGE_SIZE)
         else:
-            search_params["paginationInput.pageNumber"] = str(next_page)
+            break
 
 
 def item_to_listing(
     item: dict,
-    search_params: dict[str, str],
+    search_params: dict[str, str | dict[str, str]],
     price_suggestions: PriceSuggestions,
     release_id: int | None,
 ) -> Listing:
-    start_time = datetime.fromisoformat(
-        item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
-    )
+    # import pprint
+
+    # pprint.pprint(item)
+
+    start_time = datetime.fromisoformat(item["itemCreationDate"].replace("Z", "+00:00"))
+
+    price = float(item["price" if "price" in item else "currentBidPrice"]["value"])
 
     shipping_price = None
-    match item["shippingInfo"][0]["shippingType"][0]:
-        case "Flat":
-            if "shippingServiceCost" in item["shippingInfo"][0]:
-                shipping_price = float(
-                    item["shippingInfo"][0]["shippingServiceCost"][0]["__value__"]
-                )
+    for shipping_option in item.get("shippingOptions", []):
+        if shipping_option.get("shippingCostType") == "FIXED":
+            shipping_cost = shipping_option.get("shippingCost", {})
+            if "value" in shipping_cost:
+                shipping_price = float(shipping_cost["value"])
 
     return Listing(
-        item["itemId"][0],
-        item["viewItemURL"][0],
-        item["title"][0],
+        quote(item["itemId"]),
+        item["itemWebUrl"],
+        item["title"],
         start_time,
         (now() - start_time).days,
-        item["sellingStatus"][0]["sellingState"][0] == "Active",
-        item.get("pictureURLSuperSize", item["galleryURL"])[0],
-        float(item["sellingStatus"][0]["convertedCurrentPrice"][0]["__value__"]),
+        item["image"]["imageUrl"],
+        price,
         shipping_price,
-        item["country"][0],
-        item["listingInfo"][0]["listingType"][0] in ("AuctionWithBIN", "FixedPrice"),
+        item["itemLocation"]["country"],
+        "FIXED_PRICE" in item["buyingOptions"],
         search_params,
         price_suggestions,
         release_id,
@@ -336,31 +334,16 @@ def describe(listing: Listing) -> str:
     )
     if listing.shipping_price is not None:
         description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
+    
     for condition in ("VGP", "NM"):
         if condition in listing.price_suggestions:
             description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
+    
     description += f'<img src="{listing.image_url}"/>'
-    if "keywords" in listing.search_params:
-        description += f"<p>{html.escape(listing.search_params['keywords'])}</p>"
-    if (
-        "itemFilter.name" in listing.search_params
-        and listing.search_params["itemFilter.name"] == "Seller"
-    ):
-        description += (
-            f"<p>{html.escape(listing.search_params['itemFilter.value'])}</p>"
-        )
-    elif (
-        "itemFilter(0).name" in listing.search_params
-        and listing.search_params["itemFilter(0).name"] == "Seller"
-    ):
-        description += (
-            f"<p>{html.escape(listing.search_params['itemFilter(0).value'])}</p>"
-        )
-    if listing.release_id is not None:
-        description += (
-            f'<p><a href="https://www.discogs.com/release/{listing.release_id}">'
-            f"https://www.discogs.com/release/{listing.release_id}</p>"
-        )
+
+    if "q" in listing.search_params:
+        description += f"<p>{html.escape(str(listing.search_params['q']))}</p>"
+
     return description
 
 
@@ -399,7 +382,6 @@ def copy_remaining_entries(
 def include_in_feed(listing: Listing, listing_ids: set[str]) -> bool:
     return (
         listing.id not in listing_ids
-        and listing.active
         and listing.age_in_days <= config.MAX_LISTING_AGE_DAYS
     )
 
