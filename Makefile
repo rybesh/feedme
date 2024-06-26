@@ -31,6 +31,7 @@ deploy: ../deals/searches.pickle searches.txt
 	caffeinate -s \
 	fly deploy \
 	--build-secret APP_ID="$$APP_ID" \
+	--build-secret CERT_ID="$$CERT_ID" \
 	--build-secret FEED_URL="$$FEED_URL" \
 	--build-secret FEED_AUTHOR_NAME="$$FEED_AUTHOR_NAME" \
 	--build-secret FEED_AUTHOR_EMAIL="$$FEED_AUTHOR_EMAIL"

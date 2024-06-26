@@ -11,6 +11,7 @@ import time
 import pickle
 
 from atoma.atom import AtomEntry, AtomFeed
+from base64 import b64encode
 from datetime import datetime, timezone, timedelta
 from feedgen.feed import FeedGenerator
 from ratelimit import limits, sleep_and_retry
@@ -23,15 +24,6 @@ from config import config
 
 ITEMS_PAGE_SIZE = 200
 
-headers = {
-    "OPERATION-NAME": "findItemsAdvanced",
-    "SERVICE-VERSION": "1.13.0",
-    "SECURITY-APPNAME": config.APP_ID,
-    "RESPONSE-DATA-FORMAT": "JSON",
-    "REST-PAYLOAD": "",
-}
-
-
 PriceSuggestions: TypeAlias = dict[str, float]
 
 
@@ -41,14 +33,14 @@ class Listing(NamedTuple):
     title: str
     start_time: datetime
     age_in_days: int
-    active: bool
     image_url: str
     price: float
     shipping_price: float | None
     country: str
     buy_it_now: bool
-    search_params: dict[str, str]
+    search_params: dict[str, str | dict[str, str]]
     price_suggestions: PriceSuggestions
+    release_id: int | None
 
 
 class APIException(Exception):
@@ -79,20 +71,53 @@ def log(x: Any) -> None:
     print(x, file=sys.stderr)
 
 
+bearer_token = None
+
+
+def refresh_bearer_token(client: httpx.Client) -> None:
+    token = b64encode(f"{config.APP_ID}:{config.CERT_ID}\n".encode()).decode()
+    r = client.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {token}",
+        },
+        data={
+            "grant_type": "client_credentials",
+            "scope": "https://api.ebay.com/oauth/api_scope",
+        },
+    )
+    o = r.json()
+    global bearer_token
+    bearer_token = o["access_token"]
+
+
 @sleep_and_retry
 @limits(calls=1, period=1)
-def new_call_api(
-    client: httpx.Client, search_params: dict[str, str | dict[str, str]]
+def call_api(
+    client: httpx.Client,
+    search_params: dict[str, str | dict[str, str]],
 ) -> dict:
+    query_params = {}
+    for key, value in search_params.items():
+        if isinstance(value, dict):
+            query_params[key] = ",".join([f"{k}:{v}" for k, v in value.items()])
+        else:
+            query_params[key] = value
+
+    if bearer_token is None:
+        refresh_bearer_token(client)
+
     tries = 0
     while True:
         try:
             r = client.get(
                 "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                params=(headers | search_params),
+                params=query_params,
+                headers={"Authorization": f"Bearer {bearer_token}"},
             )
 
-            new_call_api.counter += 1
+            call_api.counter += 1
 
             if not r.status_code == 200:
                 message_parts = [f"GET {r.url} failed ({r.status_code})"]
@@ -101,7 +126,7 @@ def new_call_api(
                         message_parts.append(e["message"])
                         if e["category"] == "REQUEST" and e["errorId"] == 2001:
                             raise TooManyAPICallsException(
-                                f"Too many API calls ({new_call_api.counter}) within 24 hours"
+                                f"Too many API calls ({call_api.counter}) within 24 hours"
                             )
                 except (KeyError, JSONDecodeError):
                     pass
@@ -113,55 +138,6 @@ def new_call_api(
 
             return o
 
-        except httpx.RequestError as e:
-            tries += 1
-            if tries > 10:
-                raise APIException(f"API call failed ({e})") from e
-            else:
-                time.sleep(60)
-
-
-new_call_api.counter = 0
-
-
-@sleep_and_retry
-@limits(calls=1, period=1)
-def call_api(client: httpx.Client, search_params: dict[str, str]) -> dict:
-    tries = 0
-    while True:
-        try:
-            r = client.get(
-                "https://svcs.ebay.com/services/search/FindingService/v1",
-                params=(headers | search_params),
-            )
-
-            call_api.counter += 1
-
-            if not r.status_code == 200:
-                message_parts = [f"GET {r.url} failed ({r.status_code})"]
-                try:
-                    upstream_message = r.json()["errorMessage"][0]["error"][0][
-                        "message"
-                    ][0]
-                    if (
-                        upstream_message
-                        == "Service call has exceeded the number of times the operation is allowed to be called"
-                    ):
-                        raise TooManyAPICallsException(
-                            f"Too many API calls ({call_api.counter}) within 24 hours"
-                        )
-                    else:
-                        message_parts.append(upstream_message)
-                except (KeyError, JSONDecodeError):
-                    pass
-                raise APIException("\n".join(message_parts))
-
-            o = r.json()["findItemsAdvancedResponse"][0]
-            if not o["ack"][0] == "Success":
-                raise APIException(
-                    f"GET {r.url}:\nfindItemsAdvancedResponse ack was {o['ack'][0]}"
-                )
-            return o
         except httpx.RequestError as e:
             tries += 1
             if tries > 10:
@@ -207,13 +183,6 @@ def add_location_preference(
         d["filters"] = filters
 
 
-def add_seller(params: dict[str, list[str]], d: dict[str, str | dict[str, str]]):
-    if "_ssn" in params:
-        filters: dict[str, str] = cast(dict[str, str], d.get("filter", {}))
-        filters["sellers"] = "{" + params["_ssn"][0] + "}"
-        d["filters"] = filters
-
-
 def parse_search_params(url: str) -> dict[str, str | dict[str, str]]:
     d = {
         "filter": {"buyingOptions": "{AUCTION|FIXED_PRICE}"},
@@ -226,13 +195,8 @@ def parse_search_params(url: str) -> dict[str, str | dict[str, str]]:
         add_category(o.path, d)
         add_keywords(params, d)
         add_location_preference(params, d)
-    elif o.path.endswith("m.html"):
-        add_seller(params, d)
     else:
         raise BadSearchURLException(f"Cannot handle url:\n{url}")
-    # from pprint import pprint
-
-    # pprint(d, stream=sys.stderr)
     return d
 
 
@@ -244,42 +208,50 @@ def get_results(
     filters["itemStartDate"] = f"[{last_updated.isoformat().replace('+00:00', 'Z')}]"
     search_params["filter"] = filters
     while True:
-        response = new_call_api(client, search_params)
-        for item in response["itemSummaries"]:
+        response = call_api(client, search_params)
+        for item in response.get("itemSummaries", []):
             yield item, search_params.copy()
         if "next" in response:
             search_params["offset"] = str(response["offset"] + ITEMS_PAGE_SIZE)
+        else:
+            break
 
 
 def item_to_listing(
-    item: dict, search_params: dict[str, str], price_suggestions: PriceSuggestions
+    item: dict,
+    search_params: dict[str, str | dict[str, str]],
+    price_suggestions: PriceSuggestions,
+    release_id: int | None,
 ) -> Listing:
-    start_time = datetime.fromisoformat(
-        item["listingInfo"][0]["startTime"][0].replace("Z", "+00:00")
-    )
+    # import pprint
+
+    # pprint.pprint(item)
+
+    start_time = datetime.fromisoformat(item["itemCreationDate"].replace("Z", "+00:00"))
+
+    price = float(item["price" if "price" in item else "currentBidPrice"]["value"])
 
     shipping_price = None
-    match item["shippingInfo"][0]["shippingType"][0]:
-        case "Flat":
-            if "shippingServiceCost" in item["shippingInfo"][0]:
-                shipping_price = float(
-                    item["shippingInfo"][0]["shippingServiceCost"][0]["__value__"]
-                )
+    for shipping_option in item.get("shippingOptions", []):
+        if shipping_option.get("shippingCostType") == "FIXED":
+            shipping_cost = shipping_option.get("shippingCost", {})
+            if "value" in shipping_cost:
+                shipping_price = float(shipping_cost["value"])
 
     return Listing(
-        item["itemId"][0],
-        item["viewItemURL"][0],
-        item["title"][0],
+        item["itemId"],
+        item["itemWebUrl"],
+        item["title"],
         start_time,
         (now() - start_time).days,
-        item["sellingStatus"][0]["sellingState"][0] == "Active",
-        item.get("pictureURLSuperSize", item["galleryURL"])[0],
-        float(item["sellingStatus"][0]["convertedCurrentPrice"][0]["__value__"]),
+        item["image"]["imageUrl"],
+        price,
         shipping_price,
-        item["country"][0],
-        item["listingInfo"][0]["listingType"][0] in ("AuctionWithBIN", "FixedPrice"),
+        item["itemLocation"]["country"],
+        "FIXED_PRICE" in item["buyingOptions"],
         search_params,
         price_suggestions,
+        release_id,
     )
 
 
@@ -308,7 +280,7 @@ def clear_next_url() -> None:
 
 def get_listings(
     client: httpx.Client,
-    search_urls: list[tuple[str, PriceSuggestions]],
+    search_urls: list[tuple[str, PriceSuggestions, int | None]],
     last_updated: datetime,
     minutes: int | None = None,
 ) -> Iterator[Listing]:
@@ -321,7 +293,7 @@ def get_listings(
     try:
         start = time.time()
 
-        for i, (url, price_suggestions) in enumerate(search_urls, start=1):
+        for i, (url, price_suggestions, release_id) in enumerate(search_urls, start=1):
             last_url = url
 
             if next_url is not None:
@@ -334,7 +306,9 @@ def get_listings(
 
             try:
                 for item, search_params in get_results(client, url, last_updated):
-                    yield item_to_listing(item, search_params, price_suggestions)
+                    yield item_to_listing(
+                        item, search_params, price_suggestions, release_id
+                    )
             except (BadSearchURLException, APIException) as e:
                 log(e)
 
@@ -364,22 +338,8 @@ def describe(listing: Listing) -> str:
         if condition in listing.price_suggestions:
             description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
     description += f'<img src="{listing.image_url}"/>'
-    if "keywords" in listing.search_params:
-        description += f"<p>{html.escape(listing.search_params['keywords'])}</p>"
-    if (
-        "itemFilter.name" in listing.search_params
-        and listing.search_params["itemFilter.name"] == "Seller"
-    ):
-        description += (
-            f"<p>{html.escape(listing.search_params['itemFilter.value'])}</p>"
-        )
-    elif (
-        "itemFilter(0).name" in listing.search_params
-        and listing.search_params["itemFilter(0).name"] == "Seller"
-    ):
-        description += (
-            f"<p>{html.escape(listing.search_params['itemFilter(0).value'])}</p>"
-        )
+    if "q" in listing.search_params:
+        description += f"<p>{html.escape(str(listing.search_params['q']))}</p>"
     return description
 
 
@@ -418,7 +378,6 @@ def copy_remaining_entries(
 def include_in_feed(listing: Listing, listing_ids: set[str]) -> bool:
     return (
         listing.id not in listing_ids
-        and listing.active
         and listing.age_in_days <= config.MAX_LISTING_AGE_DAYS
     )
 
