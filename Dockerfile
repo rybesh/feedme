@@ -23,10 +23,12 @@ COPY update-feed.sh /
 RUN curl http://deals.internal:8043/searches.pickle -o /searches.pickle
 RUN mkdir -p /srv/http
 RUN --mount=type=secret,id=APP_ID \
+    --mount=type=secret,id=CERT_ID \
     --mount=type=secret,id=FEED_URL \
     --mount=type=secret,id=FEED_AUTHOR_NAME \
     --mount=type=secret,id=FEED_AUTHOR_EMAIL \
     APP_ID="$(cat /run/secrets/APP_ID)" \
+    CERT_ID="$(cat /run/secrets/CERT_ID)" \
     FEED_URL="$(cat /run/secrets/FEED_URL)" \
     FEED_AUTHOR_NAME="$(cat /run/secrets/FEED_AUTHOR_NAME)" \
     FEED_AUTHOR_EMAIL="$(cat /run/secrets/FEED_AUTHOR_EMAIL)" \
