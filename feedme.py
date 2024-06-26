@@ -17,7 +17,7 @@ from feedgen.feed import FeedGenerator
 from ratelimit import limits, sleep_and_retry
 from tendo.singleton import SingleInstance, SingleInstanceException
 from typing import Optional, NamedTuple, Iterator, Any, TypeAlias, cast
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 from json.decoder import JSONDecodeError
 
 from config import config
@@ -239,7 +239,7 @@ def item_to_listing(
                 shipping_price = float(shipping_cost["value"])
 
     return Listing(
-        item["itemId"],
+        quote(item["itemId"]),
         item["itemWebUrl"],
         item["title"],
         start_time,
