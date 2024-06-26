@@ -334,12 +334,16 @@ def describe(listing: Listing) -> str:
     )
     if listing.shipping_price is not None:
         description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
+    
     for condition in ("VGP", "NM"):
         if condition in listing.price_suggestions:
             description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
+    
     description += f'<img src="{listing.image_url}"/>'
+
     if "q" in listing.search_params:
         description += f"<p>{html.escape(str(listing.search_params['q']))}</p>"
+
     return description
 
 
@@ -422,7 +426,7 @@ def main():
 
     with open(args.searches) as f:
         for url in [line.strip() for line in f]:
-            search_urls.append({"search_url": url, "price_suggestions": {}})
+            search_urls.append((url, {}, None))
 
     with httpx.Client() as client:
         for listing in get_listings(
