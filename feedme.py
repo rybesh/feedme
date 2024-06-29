@@ -53,6 +53,11 @@ class TooManyAPICallsException(Exception):
         super().__init__(message)
 
 
+class ExpiredTokenException(Exception):
+    def __init__(self):
+        super().__init__()
+
+
 class BadSearchURLException(Exception):
     def __init__(self, message: str):
         super().__init__(message)
@@ -75,6 +80,7 @@ bearer_token = None
 
 
 def refresh_bearer_token(client: httpx.Client) -> None:
+    global bearer_token
     token = b64encode(f"{config.APP_ID}:{config.CERT_ID}\n".encode()).decode()
     r = client.post(
         "https://api.ebay.com/identity/v1/oauth2/token",
@@ -88,7 +94,6 @@ def refresh_bearer_token(client: httpx.Client) -> None:
         },
     )
     o = r.json()
-    global bearer_token
     bearer_token = o["access_token"]
 
 
@@ -98,6 +103,8 @@ def call_api(
     client: httpx.Client,
     search_params: dict[str, str | dict[str, str]],
 ) -> dict:
+    global bearer_token
+
     query_params = {}
     for key, value in search_params.items():
         if isinstance(value, dict):
@@ -105,11 +112,11 @@ def call_api(
         else:
             query_params[key] = value
 
-    if bearer_token is None:
-        refresh_bearer_token(client)
-
     tries = 0
     while True:
+        if bearer_token is None:
+            refresh_bearer_token(client)
+
         try:
             r = client.get(
                 "https://api.ebay.com/buy/browse/v1/item_summary/search",
@@ -119,24 +126,31 @@ def call_api(
 
             call_api.counter += 1
 
-            if not r.status_code == 200:
+            if r.status_code == 200:
+                o = r.json()
+                for w in o.get("warnings", []):
+                    log(f"{w['category']} ({w['errorId']}) {w['message']}")
+                return o
+
+            else:
                 message_parts = [f"GET {r.url} failed ({r.status_code})"]
                 try:
                     for e in r.json().get("errors", []):
                         message_parts.append(e["message"])
-                        if e["category"] == "REQUEST" and e["errorId"] == 2001:
-                            raise TooManyAPICallsException(
-                                f"Too many API calls ({call_api.counter}) within 24 hours"
-                            )
+                        if e["category"] == "REQUEST":
+                            if e["errorId"] == 1001:
+                                raise ExpiredTokenException()
+                            elif e["errorId"] == 2001:
+                                raise TooManyAPICallsException(
+                                    f"Too many API calls ({call_api.counter}) within 24 hours"
+                                )
                 except (KeyError, JSONDecodeError):
                     pass
+
                 raise APIException("\n".join(message_parts))
 
-            o = r.json()
-            for w in o.get("warnings", []):
-                log(f"{w['category']} ({w['errorId']}) {w['message']}")
-
-            return o
+        except ExpiredTokenException:
+            bearer_token = None
 
         except httpx.RequestError as e:
             tries += 1
