@@ -342,21 +342,26 @@ def get_listings(
 
 
 def describe(listing: Listing) -> str:
-    description = (
-        f"<p>${listing.price:.2f}{' (BIN)' if listing.buy_it_now else ''}</p>"
-        f"<p>ships from {listing.country}</p>"
-    )
-    if listing.shipping_price is not None:
-        description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
-    
+    description = f"<p>${listing.price:.2f}{' (BIN)' if listing.buy_it_now else ''}</p>"
+
     for condition in ("VGP", "NM"):
         if condition in listing.price_suggestions:
             description += f"<p>suggested price ({condition}): ${listing.price_suggestions[condition]:.2f}</p>"
-    
+
+    if listing.shipping_price is not None:
+        description += f"<p>shipping: ${listing.shipping_price:.2f}</p>"
+
+    description += f"<p>ships from {listing.country}</p>"
     description += f'<img src="{listing.image_url}"/>'
 
     if "q" in listing.search_params:
         description += f"<p>{html.escape(str(listing.search_params['q']))}</p>"
+
+    if listing.release_id is not None:
+        description += (
+            f'<p><a href="https://www.discogs.com/release/{listing.release_id}">'
+            f"https://www.discogs.com/release/{listing.release_id}</p>"
+        )
 
     return description
 
